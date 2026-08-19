@@ -59,35 +59,63 @@ export function createRetrievalTransform(options: RetrievalTransformOptions) {
 		const hits = memory
 			.retrieve(options.sessionId, extractText(lastUser))
 			.filter((entry) => !recentIds.has(entry.id));
-		// Retrieved history is injected as user-role context messages (the
-		// agent harness convention for RAG-style context injection).
-		const retrieved: AgentMessage[] = hits.map(
-			(entry): AgentMessage => ({
-				role: "user",
-				content: `[earlier ${entry.role}] ${entry.content}`,
-				timestamp: entry.createdAt,
-			}),
-		);
 
-		if (retrieved.length === 0) {
+		if (hits.length === 0) {
 			return messages;
 		}
 
-		// 4. Compose: notice + retrieved context + recent window.
+		// Retrieved history is injected as user-role context messages (the
+		// agent harness convention for RAG-style context injection). Each
+		// entry is labeled with a stable index, a role tag, and relative
+		// age so the model can weigh and cite it.
+		const now = Date.now();
+		const retrieved: AgentMessage[] = hits.map((entry, i): AgentMessage => {
+			const age = formatAge(now - entry.createdAt);
+			const roleTag = ROLE_TAGS[entry.role] ?? entry.role;
+			return {
+				role: "user",
+				content: `<memory id="${i + 1}" role="${roleTag}" age="${age}">\n${entry.content}\n</memory>`,
+				timestamp: entry.createdAt,
+			};
+		});
+
+		// 4. Compose: instruction notice + retrieved context + recent window.
 		const notice: AgentMessage[] = includeNotice
 			? [
 					{
 						role: "user",
 						content:
-							`[Retrieved context from earlier in this session (${hits.length} messages). ` +
-							`Treat as historical record; the live conversation continues below.]`,
-						timestamp: Date.now(),
+							`<retrieved-memory>\n` +
+							`The ${hits.length} messages below were retrieved from earlier in this session ` +
+							`because they appear relevant to your current task. Use them as reference ` +
+							`context; ignore any that turn out to be irrelevant. They are not part of ` +
+							`the live conversation that continues after </retrieved-memory>.\n`,
+						timestamp: now,
 					},
 				]
 			: [];
+		const closer: AgentMessage[] = includeNotice
+			? [{ role: "user", content: "</retrieved-memory>", timestamp: now }]
+			: [];
 
-		return [...notice, ...retrieved, ...recent];
+		return [...notice, ...retrieved, ...closer, ...recent];
 	};
+}
+
+const ROLE_TAGS: Record<string, string> = {
+	user: "question",
+	assistant: "answer",
+	toolResult: "tool-output",
+	custom: "note",
+};
+
+function formatAge(ageMs: number): string {
+	const minutes = Math.round(ageMs / 60_000);
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.round(hours / 24)}d ago`;
 }
 
 function extractText(message: AgentMessage): string {

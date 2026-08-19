@@ -8,6 +8,7 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { createRetrievalTransform } from "./memory/transform-context.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -350,8 +351,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionId: sessionManager.getSessionId(),
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
-			if (!runner) return messages;
-			return runner.emitContext(messages);
+			let context = runner ? await runner.emitContext(messages) : messages;
+			const memorySettings = settingsManager.getRetrievalMemorySettings();
+			if (memorySettings.enabled) {
+				const dbPath = join(cwd, ".pi", "memory.sqlite");
+				const retrievalTransform = createRetrievalTransform({
+					sessionId: sessionManager.getSessionId(),
+					dbPath,
+					settings: {
+						topK: memorySettings.topK,
+						keepRecent: memorySettings.keepRecent,
+					},
+				});
+				context = await retrievalTransform(context);
+			}
+			return context;
 		},
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),

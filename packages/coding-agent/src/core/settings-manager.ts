@@ -13,6 +13,12 @@ export interface CompactionSettings {
 	keepRecentTokens?: number; // default: 20000
 }
 
+export interface RetrievalMemorySettings {
+	enabled?: boolean; // default: false - SQLite retrieval memory
+	topK?: number; // default: 8 relevant historical messages per request
+	keepRecent?: number; // default: 12 most recent messages always kept verbatim
+}
+
 export interface BranchSummarySettings {
 	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
@@ -88,6 +94,7 @@ export interface Settings {
 	theme?: string;
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
+	memory?: RetrievalMemorySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
@@ -784,6 +791,15 @@ export class SettingsManager {
 		return {
 			reserveTokens: this.settings.branchSummary?.reserveTokens ?? 16384,
 			skipPrompt: this.settings.branchSummary?.skipPrompt ?? false,
+		};
+	}
+
+	getRetrievalMemorySettings(): { enabled: boolean; topK: number; keepRecent: number } {
+		const memory = this.settings.memory;
+		return {
+			enabled: memory?.enabled ?? false,
+			topK: memory?.topK ?? 8,
+			keepRecent: memory?.keepRecent ?? 12,
 		};
 	}
 

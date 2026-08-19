@@ -31,13 +31,11 @@ export function createRetrievalTransform(options: RetrievalTransformOptions) {
 	const includeNotice = options.includeNotice ?? true;
 
 	return async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
-		// 1. Mirror new messages into SQLite (dedup by id when available).
+		// 1. Mirror new messages into SQLite. Dedup uses a deterministic
+		//    content hash as the entry id — INSERT OR REPLACE makes
+		//    re-sent history a no-op instead of duplicating rows.
 		for (const message of messages) {
 			if (SKIP_ROLES.has(message.role)) {
-				continue;
-			}
-			const id = (message as { id?: string }).id ?? null;
-			if (id && memory.has(id)) {
 				continue;
 			}
 			memory.store(options.sessionId, message.role, extractText(message));

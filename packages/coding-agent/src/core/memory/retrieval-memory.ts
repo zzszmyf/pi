@@ -16,7 +16,9 @@
  *   stored under the project dir as .pi/memory.sqlite.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export interface MemoryEntry {
@@ -69,6 +71,7 @@ export class RetrievalMemory {
 	private readonly _settings: RetrievalMemorySettings;
 
 	constructor(dbPath: string, settings?: Partial<RetrievalMemorySettings>) {
+		mkdirSync(dirname(dbPath), { recursive: true });
 		this.db = new DatabaseSync(dbPath);
 		this._settings = { ...DEFAULT_RETRIEVAL_MEMORY_SETTINGS, ...settings };
 		this.db.exec("PRAGMA journal_mode = WAL;");
@@ -92,9 +95,13 @@ export class RetrievalMemory {
 		if (!content.trim()) {
 			return;
 		}
+		// Deterministic content-hash id: re-sent history (the harness resends
+		// the full context every turn) becomes an INSERT OR REPLACE no-op
+		// instead of duplicating rows.
+		const id = createHash("sha1").update(`${role}\0${content}`).digest("hex").slice(0, 32);
 		this.db
 			.prepare("INSERT OR REPLACE INTO entries (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)")
-			.run(randomUUID(), sessionId, role, content, createdAt);
+			.run(id, sessionId, role, content, createdAt);
 	}
 
 	/**

@@ -8,8 +8,8 @@
  */
 
 import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import type { EmbeddingClientOptions } from "./embedding.ts";
 import { EmbeddingClient } from "./embedding.ts";
 import { Notebook } from "./notebook.ts";
@@ -31,23 +31,36 @@ const readRecentSchema = Type.Object({
 });
 
 export interface MemoryToolsOptions {
-	sessionId: string;
-	dbPath: string;
-	embedding?: EmbeddingClientOptions;
+	/** Lazy context resolver — evaluated on every tool call so the extension
+	 * can initialize cwd/session/embedding after the first context event. */
+	getContext: () => {
+		sessionId: string;
+		dbPath: string;
+		embedding?: EmbeddingClientOptions;
+	};
 }
 
 export function createMemoryToolDefinitions(options: MemoryToolsOptions): ToolDefinition[] {
-	const notebook = new Notebook(options.dbPath);
-	const embedder = options.embedding ? new EmbeddingClient(options.embedding) : null;
+	// Lazy singletons, resolved from getContext on first use.
+	let notebook: Notebook | null = null;
+	let embedder: EmbeddingClient | null = null;
+
+	const resolve = () => {
+		const ctx = options.getContext();
+		if (!notebook) notebook = new Notebook(ctx.dbPath);
+		if (!embedder && ctx.embedding) embedder = new EmbeddingClient(ctx.embedding);
+		return { ...ctx, notebook, embedder };
+	};
 
 	const vectorizePending = async () => {
-		if (!embedder) return;
+		const { notebook: nb, embedder: emb, sessionId } = resolve();
+		if (!emb || !nb) return;
 		try {
-			const pending = notebook.pendingVectorIds(options.sessionId, 32);
+			const pending = nb.pendingVectorIds(sessionId, 32);
 			if (pending.length === 0) return;
-			const vecs = await embedder.embed(pending.map((p) => p.content));
+			const vecs = await emb.embed(pending.map((p) => p.content));
 			for (let i = 0; i < pending.length; i++) {
-				notebook.storeVector(pending[i].id, vecs[i]);
+				nb.storeVector(pending[i].id, vecs[i]);
 			}
 		} catch (error) {
 			console.error("[memory] note vectorization failed:", error);
@@ -78,7 +91,8 @@ export function createMemoryToolDefinitions(options: MemoryToolsOptions): ToolDe
 			_onUpdate: AgentToolUpdateCallback<unknown> | undefined,
 			_ctx: ExtensionContext,
 		) {
-			const note = notebook.write(options.sessionId, params.content, params.category);
+			const { notebook: nb, sessionId } = resolve();
+			const note = nb.write(sessionId, params.content, params.category);
 			void vectorizePending();
 			return text(`Noted${note.category ? ` (${note.category})` : ""}.`);
 		},
@@ -101,11 +115,13 @@ export function createMemoryToolDefinitions(options: MemoryToolsOptions): ToolDe
 		) {
 			const topK = Math.min(20, Math.max(1, Math.floor(params.topK ?? 5)));
 			await vectorizePending();
-			let notes = notebook.searchKeyword(options.sessionId, params.query, topK * 2);
-			if (embedder) {
+			const { notebook: nb2, sessionId: sid2 } = resolve();
+			let notes = nb2.searchKeyword(sid2, params.query, topK * 2);
+			const { embedder: emb2 } = resolve();
+			if (emb2) {
 				try {
-					const [queryVec] = await embedder.embed([params.query]);
-					const semantic = notebook.searchVector(options.sessionId, queryVec, topK * 2);
+					const [queryVec] = await emb2.embed([params.query]);
+					const semantic = nb2.searchVector(sid2, queryVec, topK * 2);
 					const seen = new Set(notes.map((n) => n.id));
 					for (const n of semantic) {
 						if (!seen.has(n.id)) {
@@ -141,7 +157,8 @@ export function createMemoryToolDefinitions(options: MemoryToolsOptions): ToolDe
 			_ctx: ExtensionContext,
 		) {
 			const n = Math.min(50, Math.max(1, Math.floor(params.n ?? 10)));
-			const notes = notebook.readRecent(options.sessionId, n);
+			const { notebook: nb3 } = resolve();
+			const notes = nb3.readRecent("", n);
 			if (notes.length === 0) {
 				return text("Notebook is empty.");
 			}

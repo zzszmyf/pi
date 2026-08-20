@@ -9,6 +9,7 @@ import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { createRetrievalTransform } from "./memory/transform-context.ts";
+import { createMemoryToolDefinitions } from "./memory/memory-tools.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -390,6 +391,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
+	// Memory notebook tools: register write_note / search_notes /
+	// read_recent_notes when retrieval memory is enabled, so the agent can
+	// actively write and read its own notes instead of relying only on the
+	// passive mirror.
+	const memorySettingsForTools = settingsManager.getRetrievalMemorySettings();
+	const memoryTools =
+		memorySettingsForTools.enabled
+			? createMemoryToolDefinitions({
+					sessionId: sessionManager.getSessionId(),
+					dbPath: join(cwd, ".pi", "memory.sqlite"),
+					embedding: settingsManager.getRetrievalEmbeddingSettings() ?? undefined,
+				})
+			: [];
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -397,7 +412,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		cwd,
 		scopedModels: options.scopedModels,
 		resourceLoader,
-		customTools: options.customTools,
+		customTools: [...(options.customTools ?? []), ...memoryTools],
 		modelRegistry,
 		initialActiveToolNames,
 		allowedToolNames,

@@ -80,6 +80,11 @@ export class Notebook {
 		return { id, category: category ?? null, content, createdAt: now };
 	}
 
+	/** Delete a note (lifecycle maintenance from the distillation subagent). */
+	delete(id: string): void {
+		this.db.prepare("DELETE FROM notes WHERE id = ?").run(id);
+	}
+
 	/** Recent N notes, newest first (temporal locality — "flip the notebook"). */
 	readRecent(sessionId: string, n: number): Note[] {
 		const rows = this.db

@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { cosineSimilarity } from "./embedding.ts";
 
 export interface MemoryEntry {
 	id: string;
@@ -64,6 +65,10 @@ END;
 CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
 	INSERT INTO entry_fts(entry_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
 END;
+CREATE TABLE IF NOT EXISTS entries_vec (
+	id TEXT PRIMARY KEY,
+	vec BLOB NOT NULL
+);
 `;
 
 export class RetrievalMemory {
@@ -146,6 +151,116 @@ export class RetrievalMemory {
 			content,
 			createdAt,
 		}));
+	}
+
+	/**
+	 * Store an embedding vector for an entry (float32 little-endian blob).
+	 * Returns false if the entry does not exist.
+	 */
+	storeVector(id: string, vec: Float32Array): boolean {
+		const row = this.db.prepare("SELECT 1 FROM entries WHERE id = ?").get(id);
+		if (!row) return false;
+		const blob = Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+		this.db.prepare("INSERT OR REPLACE INTO entries_vec (id, vec) VALUES (?, ?)").run(id, blob);
+		return true;
+	}
+
+	/** Ids of entries that still lack a stored vector. */
+	pendingVectorIds(sessionId: string, limit: number): Array<{ id: string; content: string }> {
+		const rows = this.db
+			.prepare(
+				`SELECT e.id, e.content FROM entries e
+				 LEFT JOIN entries_vec v ON v.id = e.id
+				 WHERE e.session_id = ? AND v.id IS NULL
+				 ORDER BY e.created_at ASC
+				 LIMIT ?`,
+			)
+			.all(sessionId, limit) as Array<{ id: string; content: string }>;
+		return rows;
+	}
+
+	/**
+	 * Hybrid retrieval: BM25 + cosine similarity fused with RRF.
+	 * When no vectors are stored yet, degrades to pure BM25.
+	 */
+	async retrieveHybrid(
+		sessionId: string,
+		query: string,
+		queryVector: Float32Array,
+		topK = this._settings.topK,
+	): Promise<MemoryEntry[]> {
+		const now = Date.now();
+		const halfLife = this._settings.halfLifeMs;
+
+		// Keyword candidates.
+		const keywordRows = this.db
+			.prepare(
+				`SELECT e.id, e.role, e.content, e.created_at,
+						bm25(entry_fts) AS score
+				 FROM entry_fts
+				 JOIN entries e ON e.rowid = entry_fts.rowid
+				 WHERE entry_fts MATCH ? AND e.session_id = ?
+				 ORDER BY score
+				 LIMIT 200`,
+			)
+			.all(this.#ftsQuery(query), sessionId) as Array<{
+			id: string;
+			role: string;
+			content: string;
+			created_at: number;
+			score: number;
+		}>;
+
+		const keywordRank = new Map<string, number>();
+		keywordRows.forEach((r, i) => keywordRank.set(r.id, i + 1));
+
+		// Vector candidates: cosine over stored vectors.
+		const vecRows = this.db
+			.prepare(
+				`SELECT v.id, v.vec, e.role, e.content, e.created_at
+				 FROM entries_vec v
+				 JOIN entries e ON e.id = v.id
+				 WHERE e.session_id = ?`,
+			)
+			.all(sessionId) as Array<{
+			id: string;
+			vec: Uint8Array;
+			role: string;
+			content: string;
+			created_at: number;
+		}>;
+
+		const vecScored = vecRows.map((r) => {
+			const vec = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4);
+			return { ...r, cosine: cosineSimilarity(queryVector, vec) };
+		});
+		vecScored.sort((a, b) => b.cosine - a.cosine);
+		const vecRank = new Map<string, number>();
+		vecScored.forEach((r, i) => vecRank.set(r.id, i + 1));
+
+		// RRF fusion with recency decay.
+		const all = new Map<string, { id: string; role: string; content: string; createdAt: number }>();
+		for (const r of keywordRows) {
+			all.set(r.id, { id: r.id, role: r.role, content: r.content, createdAt: r.created_at });
+		}
+		for (const r of vecScored) {
+			if (!all.has(r.id)) {
+				all.set(r.id, { id: r.id, role: r.role, content: r.content, createdAt: r.created_at });
+			}
+		}
+
+		const RRF_K = 60;
+		const fused = [...all.values()].map((e) => {
+			const kr = keywordRank.get(e.id);
+			const vr = vecRank.get(e.id);
+			let score = 0;
+			if (kr !== undefined) score += 1 / (RRF_K + kr);
+			if (vr !== undefined) score += 1 / (RRF_K + vr);
+			score *= 0.5 ** ((now - e.createdAt) / halfLife);
+			return { ...e, score };
+		});
+		fused.sort((a, b) => b.score - a.score);
+		return fused.slice(0, topK).map(({ id, role, content, createdAt }) => ({ id, role, content, createdAt }));
 	}
 
 	#ftsQuery(query: string): string {

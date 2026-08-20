@@ -355,6 +355,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const memorySettings = settingsManager.getRetrievalMemorySettings();
 			if (memorySettings.enabled) {
 				const dbPath = join(cwd, ".pi", "memory.sqlite");
+				const embedding = settingsManager.getRetrievalEmbeddingSettings();
 				const retrievalTransform = createRetrievalTransform({
 					sessionId: sessionManager.getSessionId(),
 					dbPath,
@@ -362,6 +363,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						topK: memorySettings.topK,
 						keepRecent: memorySettings.keepRecent,
 					},
+					embedding: embedding ?? undefined,
 				});
 				context = await retrievalTransform(context);
 			}

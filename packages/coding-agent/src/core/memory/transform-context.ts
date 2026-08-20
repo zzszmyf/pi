@@ -12,6 +12,8 @@
  * configurable via the memory settings object.
  */
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { EmbeddingClientOptions } from "./embedding.ts";
+import { EmbeddingClient } from "./embedding.ts";
 import type { RetrievalMemorySettings } from "./retrieval-memory.ts";
 import { RetrievalMemory } from "./retrieval-memory.ts";
 
@@ -19,15 +21,19 @@ export interface RetrievalTransformOptions {
 	sessionId: string;
 	dbPath: string;
 	settings?: Partial<RetrievalMemorySettings>;
+	/** Optional embedding backend (SiliconFlow / any OpenAI-compatible endpoint). */
+	embedding?: EmbeddingClientOptions;
 	/** Include the retrieval notice message so the model knows context was injected. */
 	includeNotice?: boolean;
 }
 
 const USER_ROLES = new Set(["user"]);
 const SKIP_ROLES = new Set(["system", "developer"]);
+const VECTOR_BATCH = 32;
 
 export function createRetrievalTransform(options: RetrievalTransformOptions) {
 	const memory = new RetrievalMemory(options.dbPath, options.settings);
+	const embedder = options.embedding ? new EmbeddingClient(options.embedding) : null;
 	const includeNotice = options.includeNotice ?? true;
 
 	return async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
@@ -45,6 +51,22 @@ export function createRetrievalTransform(options: RetrievalTransformOptions) {
 			return messages;
 		}
 
+		// 1b. Background vectorization: embed entries that lack a vector.
+		if (embedder) {
+			try {
+				const pending = memory.pendingVectorIds(options.sessionId, VECTOR_BATCH);
+				if (pending.length > 0) {
+					const vecs = await embedder.embed(pending.map((p) => p.content));
+					for (let i = 0; i < pending.length; i++) {
+						memory.storeVector(pending[i].id, vecs[i]);
+					}
+				}
+			} catch (error) {
+				// Embedding is best-effort: fall back to pure BM25 on failure.
+				console.error("[memory] vectorization failed, using keyword-only retrieval:", error);
+			}
+		}
+
 		// 2. Query = latest user message.
 		const lastUser = [...messages].reverse().find((m) => USER_ROLES.has(m.role));
 		if (!lastUser) {
@@ -55,10 +77,22 @@ export function createRetrievalTransform(options: RetrievalTransformOptions) {
 		const recent = messages.slice(-keepRecent);
 		const recentIds = new Set(recent.map((m) => (m as { id?: string }).id).filter(Boolean));
 
-		// 3. Retrieve relevant older messages.
-		const hits = memory
-			.retrieve(options.sessionId, extractText(lastUser))
-			.filter((entry) => !recentIds.has(entry.id));
+		// 3. Retrieve relevant older messages (hybrid BM25+vector when the
+		//    embedder is configured, pure BM25 otherwise).
+		const queryText = extractText(lastUser);
+		let hits;
+		if (embedder) {
+			try {
+				const [queryVec] = await embedder.embed([queryText]);
+				hits = await memory.retrieveHybrid(options.sessionId, queryText, queryVec);
+			} catch (error) {
+				console.error("[memory] hybrid retrieval failed, using keyword-only:", error);
+				hits = memory.retrieve(options.sessionId, queryText);
+			}
+		} else {
+			hits = memory.retrieve(options.sessionId, queryText);
+		}
+		hits = hits.filter((entry) => !recentIds.has(entry.id));
 
 		if (hits.length === 0) {
 			return messages;

@@ -17,6 +17,13 @@ export interface RetrievalMemorySettings {
 	enabled?: boolean; // default: false - SQLite retrieval memory
 	topK?: number; // default: 8 relevant historical messages per request
 	keepRecent?: number; // default: 12 most recent messages always kept verbatim
+	embedding?: {
+		enabled?: boolean; // default: false - vector retrieval backend
+		baseUrl?: string; // default: https://api.siliconflow.com/v1
+		apiKey?: string; // SiliconFlow (or other OpenAI-compatible) API key
+		model?: string; // default: Qwen/Qwen3-Embedding-0.6B
+		dimensions?: number; // optional Matryoshka trim (e.g. 512)
+	};
 }
 
 export interface BranchSummarySettings {
@@ -800,6 +807,24 @@ export class SettingsManager {
 			enabled: memory?.enabled ?? false,
 			topK: memory?.topK ?? 8,
 			keepRecent: memory?.keepRecent ?? 12,
+		};
+	}
+
+	getRetrievalEmbeddingSettings(): {
+		baseUrl: string;
+		apiKey: string;
+		model: string;
+		dimensions?: number;
+	} | null {
+		const embedding = this.settings.memory?.embedding;
+		if (!embedding?.enabled || !embedding?.apiKey) {
+			return null;
+		}
+		return {
+			baseUrl: embedding.baseUrl ?? "https://api.siliconflow.com/v1",
+			apiKey: embedding.apiKey,
+			model: embedding.model ?? "Qwen/Qwen3-Embedding-0.6B",
+			dimensions: embedding.dimensions,
 		};
 	}
 
